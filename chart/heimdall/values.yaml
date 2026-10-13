@@ -1,0 +1,99 @@
+# Default values for the heimdall operator.
+
+replicaCount: 1
+
+image:
+  repository: ghcr.io/ulfhedinn-dev/heimdall
+  tag: ""              # defaults to Chart.appVersion when empty
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+
+nameOverride: ""
+fullnameOverride: ""
+
+serviceAccount:
+  create: true
+  # Add cloud-provider workload-identity annotations here. Examples:
+  #   eks.amazonaws.com/role-arn: arn:aws:iam::123456789012:role/heimdall-scanner
+  #   iam.gke.io/gcp-service-account: heimdall@my-project.iam.gserviceaccount.com
+  annotations: {}
+  name: ""
+
+podAnnotations: {}
+podLabels: {}
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 65532
+  runAsGroup: 65532
+  fsGroup: 65532
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop:
+      - ALL
+  readOnlyRootFilesystem: true
+
+resources:
+  limits:
+    cpu: 1
+    memory: 1Gi
+  requests:
+    cpu: 100m
+    memory: 256Mi
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
+
+# Leader election: enable when running multiple replicas.
+leaderElection:
+  enabled: false
+
+metrics:
+  port: 8080
+healthProbes:
+  port: 8081
+
+# ---- Heimdall operator-specific settings -----------------------------------
+
+ecr:
+  # Enables the ECR credential provider on image hostnames matching
+  # `*.dkr.ecr.*.amazonaws.com`. Requires IRSA to be configured on the service
+  # account above.
+  enabled: false
+  region: us-east-1
+
+gcr:
+  enabled: true  # Google host matching is cheap; keep on
+
+slack:
+  # Incoming webhook URL. Can be set directly or via existingSecret below.
+  webhookUrl: ""
+  # When set, read the webhook URL from an existing secret with key `url`.
+  existingSecret: ""
+  # Minimum severity that triggers an alert: LOW | MEDIUM | HIGH | CRITICAL
+  minSeverity: HIGH
+
+scan:
+  # How frequently to rescan each unique image digest.
+  intervalMinutes: 60
+  # Maximum concurrent scans.
+  concurrency: 3
+
+trivy:
+  cacheDir: /var/cache/heimdall/trivy
+  offline: false       # skip DB updates (needs a pre-populated cache)
+  # Persistent volume for the trivy cache. Set storageClass to "" to use the
+  # cluster default. When persistence.enabled=false, an emptyDir is used.
+  persistence:
+    enabled: true
+    size: 2Gi
+    storageClass: ""
+
+# Install the CRDs as part of the chart. Set to false to manage them out of band.
+installCRDs: true

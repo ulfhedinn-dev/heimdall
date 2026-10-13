@@ -1,0 +1,21 @@
+Heimdall {{ .Chart.AppVersion }} installed in namespace "{{ .Release.Namespace }}".
+
+Watch the inventory build itself:
+  kubectl get imageinventories.heimdall.ulfhedinn.dev -w
+
+View vulnerability reports:
+  kubectl get vulnerabilityreports.heimdall.ulfhedinn.dev
+
+{{- if not .Values.slack.webhookUrl }}
+{{- if not .Values.slack.existingSecret }}
+
+Slack alerts are DISABLED. Set `slack.webhookUrl` or `slack.existingSecret` to receive notifications.
+{{- end }}
+{{- end }}
+
+{{- if .Values.ecr.enabled }}
+
+ECR provider enabled for region {{ .Values.ecr.region }}. Make sure the service account
+"{{ include "heimdall.serviceAccountName" . }}" has an `eks.amazonaws.com/role-arn` annotation
+mapped to an IAM role with `ecr:GetAuthorizationToken` and `ecr:BatchGetImage` permissions.
+{{- end }}

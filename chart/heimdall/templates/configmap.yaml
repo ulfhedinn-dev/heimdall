@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "heimdall.fullname" . }}-config
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "heimdall.labels" . | nindent 4 }}
+data:
+  scan-interval-minutes: {{ .Values.scan.intervalMinutes | quote }}
+  scan-concurrency: {{ .Values.scan.concurrency | quote }}
+  min-severity: {{ .Values.slack.minSeverity | quote }}
+  ecr-enabled: {{ .Values.ecr.enabled | quote }}
+  ecr-region: {{ .Values.ecr.region | quote }}
+  trivy-cache-dir: {{ .Values.trivy.cacheDir | quote }}
+  trivy-offline: {{ .Values.trivy.offline | quote }}

@@ -1,0 +1,12 @@
+bin/
+dist/
+.git/
+.github/
+chart/
+docs/
+*.md
+Dockerfile
+.dockerignore
+.gitignore
+.golangci.yml
+.goreleaser.yml

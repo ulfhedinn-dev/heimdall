@@ -1,0 +1,133 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "heimdall.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "heimdall.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "heimdall.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "heimdall.selectorLabels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- with .Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      serviceAccountName: {{ include "heimdall.serviceAccountName" . }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: operator
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args:
+            - --metrics-bind-address=:{{ .Values.metrics.port }}
+            - --health-probe-bind-address=:{{ .Values.healthProbes.port }}
+            - --scan-interval={{ .Values.scan.intervalMinutes }}m
+            - --scan-concurrency={{ .Values.scan.concurrency }}
+            - --min-severity={{ .Values.slack.minSeverity }}
+            - --trivy-cache-dir={{ .Values.trivy.cacheDir }}
+            {{- if .Values.trivy.offline }}
+            - --trivy-offline=true
+            {{- end }}
+            {{- if .Values.ecr.enabled }}
+            - --ecr-enabled=true
+            - --ecr-region={{ .Values.ecr.region }}
+            {{- end }}
+            {{- if .Values.leaderElection.enabled }}
+            - --leader-elect=true
+            {{- end }}
+          env:
+            {{- if and (not .Values.slack.existingSecret) .Values.slack.webhookUrl }}
+            - name: HEIMDALL_SLACK_WEBHOOK
+              value: {{ .Values.slack.webhookUrl | quote }}
+            {{- end }}
+            {{- if .Values.slack.existingSecret }}
+            - name: HEIMDALL_SLACK_WEBHOOK
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.slack.existingSecret }}
+                  key: url
+            {{- end }}
+          ports:
+            - name: metrics
+              containerPort: {{ .Values.metrics.port }}
+              protocol: TCP
+            - name: health
+              containerPort: {{ .Values.healthProbes.port }}
+              protocol: TCP
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: health
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: health
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          volumeMounts:
+            - name: trivy-cache
+              mountPath: {{ .Values.trivy.cacheDir }}
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}
+        {{- if .Values.trivy.persistence.enabled }}
+        - name: trivy-cache
+          persistentVolumeClaim:
+            claimName: {{ include "heimdall.fullname" . }}-trivy-cache
+        {{- else }}
+        - name: trivy-cache
+          emptyDir: {}
+        {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- if .Values.trivy.persistence.enabled }}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "heimdall.fullname" . }}-trivy-cache
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "heimdall.labels" . | nindent 4 }}
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: {{ .Values.trivy.persistence.size }}
+  {{- if .Values.trivy.persistence.storageClass }}
+  storageClassName: {{ .Values.trivy.persistence.storageClass | quote }}
+  {{- end }}
+{{- end }}

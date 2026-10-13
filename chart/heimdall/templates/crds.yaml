@@ -1,0 +1,177 @@
+{{- if .Values.installCRDs }}
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: imageinventories.heimdall.ulfhedinn.dev
+  labels:
+    {{- include "heimdall.labels" . | nindent 4 }}
+spec:
+  group: heimdall.ulfhedinn.dev
+  scope: Cluster
+  names:
+    kind: ImageInventory
+    listKind: ImageInventoryList
+    plural: imageinventories
+    singular: imageinventory
+    shortNames: [iinv]
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      subresources:
+        status: {}
+      additionalPrinterColumns:
+        - name: Image
+          type: string
+          jsonPath: .spec.imageRef
+        - name: Result
+          type: string
+          jsonPath: .status.scanResult
+        - name: Critical
+          type: integer
+          jsonPath: .status.criticalCount
+        - name: High
+          type: integer
+          jsonPath: .status.highCount
+        - name: LastScan
+          type: date
+          jsonPath: .status.lastScannedAt
+        - name: Age
+          type: date
+          jsonPath: .metadata.creationTimestamp
+      schema:
+        openAPIV3Schema:
+          type: object
+          properties:
+            spec:
+              type: object
+              required: [imageRef, imageDigest]
+              properties:
+                imageRef:
+                  type: string
+                imageDigest:
+                  type: string
+                  pattern: "^sha256:[a-f0-9]{64}$"
+                pods:
+                  type: array
+                  items:
+                    type: object
+                    required: [namespace, name, uid, containerName, containerKind]
+                    properties:
+                      namespace: {type: string}
+                      name:      {type: string}
+                      uid:       {type: string}
+                      containerName: {type: string}
+                      containerKind:
+                        type: string
+                        enum: [container, initContainer, ephemeralContainer]
+            status:
+              type: object
+              properties:
+                lastScannedAt:
+                  type: string
+                  format: date-time
+                scanResult:
+                  type: string
+                  enum: [Pending, Clean, Vulnerable, Error]
+                criticalCount: {type: integer}
+                highCount: {type: integer}
+                mediumCount: {type: integer}
+                lowCount: {type: integer}
+                active: {type: boolean}
+                lastError: {type: string}
+                conditions:
+                  type: array
+                  items:
+                    type: object
+                    required: [type, status, lastTransitionTime, reason, message]
+                    properties:
+                      type: {type: string}
+                      status: {type: string, enum: [True, False, Unknown]}
+                      lastTransitionTime: {type: string, format: date-time}
+                      reason: {type: string}
+                      message: {type: string}
+                      observedGeneration: {type: integer}
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: vulnerabilityreports.heimdall.ulfhedinn.dev
+  labels:
+    {{- include "heimdall.labels" . | nindent 4 }}
+spec:
+  group: heimdall.ulfhedinn.dev
+  scope: Cluster
+  names:
+    kind: VulnerabilityReport
+    listKind: VulnerabilityReportList
+    plural: vulnerabilityreports
+    singular: vulnerabilityreport
+    shortNames: [vulnreport]
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      subresources:
+        status: {}
+      additionalPrinterColumns:
+        - name: Image
+          type: string
+          jsonPath: .spec.imageRef
+        - name: Critical
+          type: integer
+          jsonPath: .status.summary.critical
+        - name: High
+          type: integer
+          jsonPath: .status.summary.high
+        - name: Generated
+          type: date
+          jsonPath: .status.generatedAt
+        - name: Age
+          type: date
+          jsonPath: .metadata.creationTimestamp
+      schema:
+        openAPIV3Schema:
+          type: object
+          properties:
+            spec:
+              type: object
+              required: [imageDigest]
+              properties:
+                imageDigest:
+                  type: string
+                  pattern: "^sha256:[a-f0-9]{64}$"
+                imageRef: {type: string}
+                scanner: {type: string}
+                scannerVersion: {type: string}
+                vulnDBVersion: {type: string}
+                findings:
+                  type: array
+                  items:
+                    type: object
+                    required: [vulnID, severity, packageName, version]
+                    properties:
+                      vulnID: {type: string}
+                      severity:
+                        type: string
+                        enum: [UNKNOWN, LOW, MEDIUM, HIGH, CRITICAL]
+                      packageName: {type: string}
+                      version: {type: string}
+                      fixedIn: {type: string}
+                      title: {type: string}
+                      primaryURL: {type: string}
+                      target: {type: string}
+                      firstSeen: {type: string, format: date-time}
+            status:
+              type: object
+              properties:
+                generatedAt: {type: string, format: date-time}
+                summary:
+                  type: object
+                  properties:
+                    critical: {type: integer}
+                    high: {type: integer}
+                    medium: {type: integer}
+                    low: {type: integer}
+                    unknown: {type: integer}
+{{- end }}

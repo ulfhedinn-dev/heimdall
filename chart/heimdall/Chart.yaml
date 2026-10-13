@@ -1,0 +1,19 @@
+apiVersion: v2
+name: heimdall
+description: Heimdall watches cluster images and scans them continuously for CVEs.
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+kubeVersion: ">=1.27.0-0"
+home: https://github.com/ulfhedinn-dev/heimdall
+sources:
+  - https://github.com/ulfhedinn-dev/heimdall
+keywords:
+  - security
+  - vulnerability
+  - cve
+  - trivy
+  - operator
+maintainers:
+  - name: ulfhedinn-dev
+    url: https://github.com/ulfhedinn-dev
