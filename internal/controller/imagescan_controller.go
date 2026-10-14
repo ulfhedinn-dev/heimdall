@@ -20,6 +20,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
+	"github.com/google/go-containerregistry/pkg/authn"
+
 	heimdallv1alpha1 "github.com/ulfhedinn-dev/heimdall/api/v1alpha1"
 	"github.com/ulfhedinn-dev/heimdall/internal/alert"
 	"github.com/ulfhedinn-dev/heimdall/internal/registry"
@@ -158,25 +160,41 @@ func (r *ImageScanReconciler) requeueAfter(inv *heimdallv1alpha1.ImageInventory)
 }
 
 // credentialProviderFor returns a provider that layers an imagePullSecrets
-// resolver on top of the base chain, scoped to the first pod using this
-// image (needed so we can resolve namespaced secrets).
-func (r *ImageScanReconciler) credentialProviderFor(_ context.Context, inv *heimdallv1alpha1.ImageInventory) registry.CredentialProvider {
-	if len(inv.Spec.Pods) == 0 || r.Creds == nil {
+// resolver on top of the base chain. It iterates all pods using the image
+// and returns a scoped chain for the first pod whose pull secrets yield
+// non-anonymous credentials. Falls back to the base chain if none do.
+func (r *ImageScanReconciler) credentialProviderFor(ctx context.Context, inv *heimdallv1alpha1.ImageInventory) registry.CredentialProvider {
+	if r.Creds == nil {
+		return registry.NewChain() // empty chain returns authn.Anonymous safely
+	}
+	if len(inv.Spec.Pods) == 0 {
 		return r.Creds
 	}
-	// If the base chain contains a PullSecretProvider, create a scoped copy.
-	if chain, ok := r.Creds.(*registry.Chain); ok {
-		pod := inv.Spec.Pods[0]
+	chain, ok := r.Creds.(*registry.Chain)
+	if !ok {
+		return r.Creds
+	}
+	logger := log.FromContext(ctx)
+	for _, pod := range inv.Spec.Pods {
 		providers := make([]registry.CredentialProvider, 0, len(chain.Providers))
 		for _, p := range chain.Providers {
-			if ps, ok := p.(*registry.PullSecretProvider); ok {
+			if ps, ok2 := p.(*registry.PullSecretProvider); ok2 {
 				providers = append(providers, ps.WithPod(pod.Namespace, pod.Name))
 				continue
 			}
 			providers = append(providers, p)
 		}
-		return registry.NewChain(providers...)
+		scopedChain := registry.NewChain(providers...)
+		auth, err := scopedChain.GetCredentials(ctx, inv.Spec.ImageRef)
+		if err != nil {
+			logger.V(1).Info("pod credentials failed, trying next pod", "pod", pod.Name, "namespace", pod.Namespace)
+			continue
+		}
+		if auth != nil && auth != authn.Anonymous {
+			return scopedChain
+		}
 	}
+	logger.V(1).Info("no pod pull secrets resolved, using base chain", "inventory", inv.Name)
 	return r.Creds
 }
 
@@ -197,7 +215,14 @@ func (r *ImageScanReconciler) upsertReport(ctx context.Context, inv *heimdallv1a
 		report.Spec.Scanner = rep.Scanner
 		report.Spec.ScannerVersion = rep.ScannerVersion
 		report.Spec.VulnDBVersion = rep.VulnDBVersion
-		report.Spec.Findings = toAPIFindings(rep.Findings)
+		// Build a map of existing findings so we can preserve FirstSeen timestamps.
+		existing := make(map[string]*metav1.Time, len(report.Spec.Findings))
+		for i := range report.Spec.Findings {
+			if f := &report.Spec.Findings[i]; f.FirstSeen != nil {
+				existing[f.VulnID] = f.FirstSeen
+			}
+		}
+		report.Spec.Findings = toAPIFindings(rep.Findings, existing)
 		return nil
 	})
 	if err != nil {
@@ -277,9 +302,16 @@ func reportNameForDigest(digest string) string {
 	return "report-" + hex.EncodeToString(sum[:10])
 }
 
-func toAPIFindings(in []scanner.Finding) []heimdallv1alpha1.Finding {
+// toAPIFindings converts scanner findings to API findings, preserving FirstSeen
+// timestamps for vulnerabilities already present in the report.
+func toAPIFindings(in []scanner.Finding, existing map[string]*metav1.Time) []heimdallv1alpha1.Finding {
+	now := &metav1.Time{Time: time.Now()}
 	out := make([]heimdallv1alpha1.Finding, 0, len(in))
 	for _, f := range in {
+		firstSeen := now
+		if t, ok := existing[f.VulnID]; ok && t != nil {
+			firstSeen = t
+		}
 		out = append(out, heimdallv1alpha1.Finding{
 			VulnID:      f.VulnID,
 			Severity:    heimdallv1alpha1.Severity(f.Severity),
@@ -289,7 +321,7 @@ func toAPIFindings(in []scanner.Finding) []heimdallv1alpha1.Finding {
 			Title:       f.Title,
 			PrimaryURL:  f.PrimaryURL,
 			Target:      f.Target,
-			FirstSeen:   &metav1.Time{Time: time.Now()},
+			FirstSeen:   firstSeen,
 		})
 	}
 	return out

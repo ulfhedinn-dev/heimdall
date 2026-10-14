@@ -3,11 +3,14 @@ package scanner
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
+	trivydbmeta "github.com/aquasecurity/trivy-db/pkg/metadata"
 	trivydbtypes "github.com/aquasecurity/trivy-db/pkg/types"
 	"github.com/aquasecurity/trivy/pkg/commands/artifact"
+	trivydb "github.com/aquasecurity/trivy/pkg/db"
 	fanaltypes "github.com/aquasecurity/trivy/pkg/fanal/types"
 	trivyflag "github.com/aquasecurity/trivy/pkg/flag"
 	trivytypes "github.com/aquasecurity/trivy/pkg/types"
@@ -92,6 +95,14 @@ func (t *TrivyScanner) Scan(ctx context.Context, req Request) (*Report, error) {
 		GeneratedAt:    time.Now().UTC(),
 		Findings:       normalize(raw),
 	}
+
+	// Populate the vulnerability DB version from the local cache metadata.
+	cacheDir := cacheDirOrDefault(t.CacheDir)
+	mc := trivydbmeta.NewClient(trivydb.Dir(cacheDir))
+	if dbMeta, err := mc.Get(); err == nil && dbMeta.Version != 0 {
+		report.VulnDBVersion = strconv.Itoa(dbMeta.Version)
+	}
+
 	if req.IgnoreUnfixed {
 		report.Findings = dropUnfixed(report.Findings)
 	}
@@ -171,7 +182,10 @@ func authToTrivy(a authn.Authenticator) ([]fanaltypes.Credential, error) {
 		return nil, nil
 	}
 	user, pass := cfg.Username, cfg.Password
-	if cfg.RegistryToken != "" && user == "" {
+	if cfg.IdentityToken != "" && user == "" {
+		user = "oauth2accesstoken"
+		pass = cfg.IdentityToken
+	} else if cfg.RegistryToken != "" && user == "" {
 		user = "oauth2accesstoken"
 		pass = cfg.RegistryToken
 	}

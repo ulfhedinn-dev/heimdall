@@ -180,6 +180,8 @@ func (r *PodReconciler) upsertInventory(ctx context.Context, pod *corev1.Pod, c 
 			inv.Labels = map[string]string{}
 		}
 		inv.Labels["heimdall.ulfhedinn.dev/digest-prefix"] = safeDigestLabel(c.Digest)
+		// Label by pod namespace so cleanupDeletedPod can scope its list query.
+		inv.Labels["heimdall.ulfhedinn.dev/pod-namespace"] = pod.Namespace
 		inv.Spec.ImageRef = c.Image
 		inv.Spec.ImageDigest = c.Digest
 		inv.Spec.Pods = upsertPodRef(inv.Spec.Pods, podRef)
@@ -226,12 +228,26 @@ func upsertPodRef(existing []heimdallv1alpha1.PodRef, ref heimdallv1alpha1.PodRe
 	return append(existing, ref)
 }
 
-// cleanupDeletedPod walks all ImageInventory records and removes references
-// to a pod that no longer exists. If an inventory ends up with no pods, it is
-// marked inactive but retained for historical tracking.
+// cleanupDeletedPod removes stale pod references from ImageInventory objects
+// when a pod is deleted. It scopes the list to the relevant namespace via a
+// label filter (Fix 8) and validates each ref's UID against the current pod
+// so a re-created pod with the same name is never mistakenly removed (Fix 3).
 func (r *PodReconciler) cleanupDeletedPod(ctx context.Context, key types.NamespacedName) error {
+	// Determine the UID of any pod currently running with this namespace/name.
+	// If the pod was immediately re-created it will have a different UID from
+	// the stale refs we want to remove.
+	var currentPod corev1.Pod
+	currentUID := ""
+	if err := r.Get(ctx, key, &currentPod); err == nil {
+		currentUID = string(currentPod.UID)
+	} else if !apierrors.IsNotFound(err) {
+		return err
+	}
+
 	var list heimdallv1alpha1.ImageInventoryList
-	if err := r.List(ctx, &list); err != nil {
+	if err := r.List(ctx, &list, client.MatchingLabels{
+		"heimdall.ulfhedinn.dev/pod-namespace": key.Namespace,
+	}); err != nil {
 		return err
 	}
 	for i := range list.Items {
@@ -240,6 +256,12 @@ func (r *PodReconciler) cleanupDeletedPod(ctx context.Context, key types.Namespa
 		removed := false
 		for _, p := range inv.Spec.Pods {
 			if p.Namespace == key.Namespace && p.Name == key.Name {
+				// Keep the ref only if its UID matches the currently-running pod
+				// (i.e., the pod was re-created and this ref is for the new one).
+				if currentUID != "" && p.UID == currentUID {
+					filtered = append(filtered, p)
+					continue
+				}
 				removed = true
 				continue
 			}

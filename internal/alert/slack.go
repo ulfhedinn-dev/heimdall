@@ -31,11 +31,13 @@ type Noop struct{}
 // Notify implements Alerter.
 func (Noop) Notify(context.Context, *scanner.Report) error { return nil }
 
+// notifiedTTL is how long a vuln-id is suppressed after it was alerted.
+const notifiedTTL = 7 * 24 * time.Hour
+
 // SlackAlerter posts to a Slack-compatible incoming webhook URL.
 //
-// It filters findings below MinSeverity and remembers the vuln-id set it has
-// already announced per image digest, so repeated scans of the same digest do
-// not re-page on-call every reconcile.
+// It filters findings below MinSeverity and suppresses re-alerts for the same
+// digest+vuln combination within notifiedTTL (7 days), keeping memory bounded.
 type SlackAlerter struct {
 	WebhookURL  string
 	MinSeverity heimdallv1alpha1.Severity
@@ -49,8 +51,8 @@ type SlackAlerter struct {
 	Username  string
 	IconEmoji string
 
-	mu       sync.Mutex
-	notified map[string]map[string]struct{} // digest -> vuln ids already announced
+	mu         sync.Mutex
+	notifiedAt map[string]time.Time // "digest:vulnID" -> when last alerted
 }
 
 // NewSlackAlerter constructs an alerter. When url is empty, Noop is returned.
@@ -65,35 +67,38 @@ func NewSlackAlerter(url string, min heimdallv1alpha1.Severity) Alerter {
 		WebhookURL:  url,
 		MinSeverity: min,
 		HTTPClient:  &http.Client{Timeout: 10 * time.Second},
-		notified:    map[string]map[string]struct{}{},
+		notifiedAt:  map[string]time.Time{},
 	}
 }
 
 // Notify sends an alert for findings at or above MinSeverity that have not
-// been announced for this digest before.
+// been announced for this digest within the last notifiedTTL (7 days).
 func (s *SlackAlerter) Notify(ctx context.Context, report *scanner.Report) error {
 	if report == nil {
 		return nil
 	}
 	threshold := severityOrder(scannerSeverityFromAPI(s.MinSeverity))
-	// Collect new findings.
+	now := time.Now()
+	// Collect new findings and update the TTL map under the lock.
 	var newOnes []scanner.Finding
 	s.mu.Lock()
-	seen := s.notified[report.ImageDigest]
-	if seen == nil {
-		seen = map[string]struct{}{}
+	// Lazy-prune entries older than notifiedTTL to keep memory bounded.
+	for k, t := range s.notifiedAt {
+		if now.Sub(t) > notifiedTTL {
+			delete(s.notifiedAt, k)
+		}
 	}
 	for _, f := range report.Findings {
 		if severityOrder(f.Severity) < threshold {
 			continue
 		}
-		if _, ok := seen[f.VulnID]; ok {
+		key := report.ImageDigest + ":" + f.VulnID
+		if t, ok := s.notifiedAt[key]; ok && now.Sub(t) <= notifiedTTL {
 			continue
 		}
-		seen[f.VulnID] = struct{}{}
+		s.notifiedAt[key] = now
 		newOnes = append(newOnes, f)
 	}
-	s.notified[report.ImageDigest] = seen
 	s.mu.Unlock()
 
 	if len(newOnes) == 0 {
