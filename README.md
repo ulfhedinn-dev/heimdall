@@ -122,7 +122,7 @@ spec:
   imageDigest: sha256:bb3a3f...
   imageRef: nginx:1.27
   scanner: trivy
-  scannerVersion: v0.57.1
+  scannerVersion: v0.76.1
   findings:
     - vulnID: CVE-2024-1234
       severity: HIGH
