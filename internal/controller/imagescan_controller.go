@@ -16,6 +16,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
@@ -324,12 +325,26 @@ func newFindingsSince(findings []scanner.Finding, existing map[string]*metav1.Ti
 }
 
 func (r *ImageScanReconciler) updateInventoryStatus(ctx context.Context, inv *heimdallv1alpha1.ImageInventory, rep *scanner.Report) error {
-	// Re-fetch to avoid stale status writes.
-	fresh := &heimdallv1alpha1.ImageInventory{}
-	if err := r.Get(ctx, types.NamespacedName{Name: inv.Name}, fresh); err != nil {
-		return err
-	}
 	critical, high, medium, low, _ := scanner.Summarize(rep.Findings)
+	return r.updateStatus(ctx, inv.Name, func(fresh *heimdallv1alpha1.ImageInventory) {
+		r.applyScanStatus(fresh, inv.Spec.ImageRef, critical, high, medium, low)
+	})
+}
+
+// updateStatus re-reads the inventory and applies mutate to its status,
+// retrying on write conflicts (the pod reconciler updates the same object).
+func (r *ImageScanReconciler) updateStatus(ctx context.Context, name string, mutate func(*heimdallv1alpha1.ImageInventory)) error {
+	return retry.RetryOnConflict(retry.DefaultBackoff, func() error {
+		fresh := &heimdallv1alpha1.ImageInventory{}
+		if err := r.Get(ctx, types.NamespacedName{Name: name}, fresh); err != nil {
+			return err
+		}
+		mutate(fresh)
+		return r.Status().Update(ctx, fresh)
+	})
+}
+
+func (r *ImageScanReconciler) applyScanStatus(fresh *heimdallv1alpha1.ImageInventory, imageRef string, critical, high, medium, low int) {
 	fresh.Status.LastScannedAt = &metav1.Time{Time: r.now()}
 	fresh.Status.CriticalCount = critical
 	fresh.Status.HighCount = high
@@ -344,29 +359,26 @@ func (r *ImageScanReconciler) updateInventoryStatus(ctx context.Context, inv *he
 		Type:    "Scanned",
 		Status:  metav1.ConditionTrue,
 		Reason:  "ScanCompleted",
-		Message: fmt.Sprintf("scanned %s", inv.Spec.ImageRef),
+		Message: fmt.Sprintf("scanned %s", imageRef),
 	})
-	return r.Status().Update(ctx, fresh)
 }
 
 func (r *ImageScanReconciler) markError(ctx context.Context, inv *heimdallv1alpha1.ImageInventory, scanErr error) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
 	logger.Error(scanErr, "scan failed", "digest", inv.Spec.ImageDigest)
 
-	fresh := &heimdallv1alpha1.ImageInventory{}
-	if getErr := r.Get(ctx, types.NamespacedName{Name: inv.Name}, fresh); getErr != nil {
-		return ctrl.Result{}, scanErr
-	}
-	fresh.Status.LastError = truncate(scanErr.Error(), 512)
-	fresh.Status.ScanResult = heimdallv1alpha1.ScanResultError
-	fresh.Status.LastScannedAt = &metav1.Time{Time: r.now()}
-	fresh.Status.Conditions = setCondition(fresh.Status.Conditions, metav1.Condition{
-		Type:    "Scanned",
-		Status:  metav1.ConditionFalse,
-		Reason:  "ScanFailed",
-		Message: truncate(scanErr.Error(), 256),
+	updateErr := r.updateStatus(ctx, inv.Name, func(fresh *heimdallv1alpha1.ImageInventory) {
+		fresh.Status.LastError = truncate(scanErr.Error(), 512)
+		fresh.Status.ScanResult = heimdallv1alpha1.ScanResultError
+		fresh.Status.LastScannedAt = &metav1.Time{Time: r.now()}
+		fresh.Status.Conditions = setCondition(fresh.Status.Conditions, metav1.Condition{
+			Type:    "Scanned",
+			Status:  metav1.ConditionFalse,
+			Reason:  "ScanFailed",
+			Message: truncate(scanErr.Error(), 256),
+		})
 	})
-	if updateErr := r.Status().Update(ctx, fresh); updateErr != nil {
+	if updateErr != nil {
 		logger.Error(updateErr, "update error status")
 		return ctrl.Result{}, updateErr
 	}

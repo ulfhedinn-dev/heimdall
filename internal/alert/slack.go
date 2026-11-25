@@ -37,7 +37,8 @@ const notifiedTTL = 7 * 24 * time.Hour
 // SlackAlerter posts to a Slack-compatible incoming webhook URL.
 //
 // It filters findings below MinSeverity and suppresses re-alerts for the same
-// digest+vuln combination within notifiedTTL (7 days), keeping memory bounded.
+// digest+vuln+package combination within notifiedTTL (7 days), keeping memory
+// bounded.
 type SlackAlerter struct {
 	WebhookURL  string
 	MinSeverity heimdallv1alpha1.Severity
@@ -52,7 +53,7 @@ type SlackAlerter struct {
 	IconEmoji string
 
 	mu         sync.Mutex
-	notifiedAt map[string]time.Time // "digest:vulnID" -> when last alerted
+	notifiedAt map[string]time.Time // "digest:vulnID|package" -> when last alerted
 }
 
 // NewSlackAlerter constructs an alerter. When url is empty, Noop is returned.
@@ -92,7 +93,7 @@ func (s *SlackAlerter) Notify(ctx context.Context, report *scanner.Report) error
 		if scanner.SeverityRank(f.Severity) < threshold {
 			continue
 		}
-		key := report.ImageDigest + ":" + f.VulnID
+		key := report.ImageDigest + ":" + f.VulnID + "|" + f.PackageName
 		if t, ok := s.notifiedAt[key]; ok && now.Sub(t) <= notifiedTTL {
 			continue
 		}

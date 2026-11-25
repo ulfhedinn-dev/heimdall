@@ -28,10 +28,6 @@ spec:
       name: Digest
       priority: 1
       type: string
-    - jsonPath: .spec.pods[*]
-      name: Pods
-      priority: 1
-      type: integer
     - jsonPath: .status.scanResult
       name: Result
       type: string

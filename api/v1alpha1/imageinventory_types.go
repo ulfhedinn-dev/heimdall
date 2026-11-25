@@ -89,7 +89,6 @@ type ImageInventoryStatus struct {
 // +kubebuilder:resource:scope=Cluster,shortName=iinv
 // +kubebuilder:printcolumn:name="Image",type="string",JSONPath=".spec.imageRef"
 // +kubebuilder:printcolumn:name="Digest",type="string",JSONPath=".spec.imageDigest",priority=1
-// +kubebuilder:printcolumn:name="Pods",type="integer",JSONPath=".spec.pods[*]",priority=1
 // +kubebuilder:printcolumn:name="Result",type="string",JSONPath=".status.scanResult"
 // +kubebuilder:printcolumn:name="Critical",type="integer",JSONPath=".status.criticalCount"
 // +kubebuilder:printcolumn:name="High",type="integer",JSONPath=".status.highCount"

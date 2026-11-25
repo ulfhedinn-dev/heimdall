@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"strings"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -74,6 +75,11 @@ func (r *PodReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 			continue
 		}
 		if err := r.upsertInventory(ctx, &pod, c); err != nil {
+			if apierrors.IsConflict(err) {
+				// Another writer (usually the scanner updating status) got
+				// there first; retry with fresh data.
+				return ctrl.Result{RequeueAfter: time.Second}, nil
+			}
 			logger.Error(err, "upsert inventory", "image", c.Image, "digest", c.Digest)
 			return ctrl.Result{}, err
 		}
@@ -189,18 +195,13 @@ func (r *PodReconciler) upsertInventory(ctx context.Context, pod *corev1.Pod, c 
 		return fmt.Errorf("create/update ImageInventory %s: %w", name, err)
 	}
 
-	// Status subresource: mark active, preserve scan counts, ensure Pending is set on first write.
-	if err := r.ensureInventoryStatus(ctx, name); err != nil {
-		return err
-	}
-	return nil
+	// Status subresource: mark active, preserve scan counts, ensure Pending is
+	// set on first write. inv holds the object as just written, which the
+	// informer cache may not have caught up with yet.
+	return r.ensureInventoryStatus(ctx, inv)
 }
 
-func (r *PodReconciler) ensureInventoryStatus(ctx context.Context, name string) error {
-	var inv heimdallv1alpha1.ImageInventory
-	if err := r.Get(ctx, types.NamespacedName{Name: name}, &inv); err != nil {
-		return err
-	}
+func (r *PodReconciler) ensureInventoryStatus(ctx context.Context, inv *heimdallv1alpha1.ImageInventory) error {
 	changed := false
 	if !inv.Status.Active {
 		inv.Status.Active = true
@@ -213,7 +214,7 @@ func (r *PodReconciler) ensureInventoryStatus(ctx context.Context, name string) 
 	if !changed {
 		return nil
 	}
-	return r.Status().Update(ctx, &inv)
+	return r.Status().Update(ctx, inv)
 }
 
 func upsertPodRef(existing []heimdallv1alpha1.PodRef, ref heimdallv1alpha1.PodRef) []heimdallv1alpha1.PodRef {

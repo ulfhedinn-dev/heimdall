@@ -134,3 +134,20 @@ func TestBuildPayloadTruncatesPreview(t *testing.T) {
 		t.Errorf("shortDigest = %q", got)
 	}
 }
+
+func TestNotifyKeepsSameCVEInDifferentPackages(t *testing.T) {
+	hook := &webhook{}
+	srv := httptest.NewServer(hook)
+	defer srv.Close()
+	a := NewSlackAlerter(srv.URL, heimdallv1alpha1.SeverityHigh)
+	err := a.Notify(context.Background(), testReport(
+		scanner.Finding{VulnID: "CVE-1", Severity: scanner.SeverityHigh, PackageName: "libssl3"},
+		scanner.Finding{VulnID: "CVE-1", Severity: scanner.SeverityHigh, PackageName: "openssl"},
+	))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(hook.payloads) != 1 || !strings.Contains(hook.payloads[0].Text, "2 new findings") {
+		t.Fatalf("payloads = %+v", hook.payloads)
+	}
+}
