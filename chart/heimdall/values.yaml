@@ -38,13 +38,15 @@ securityContext:
       - ALL
   readOnlyRootFilesystem: true
 
+# Trivy holds the vulnerability DB and one image's package list in memory
+# while scanning; 1Gi is enough for typical images.
 resources:
   limits:
     cpu: 1
     memory: 1Gi
   requests:
-    cpu: 100m
-    memory: 256Mi
+    cpu: 50m
+    memory: 192Mi
 
 nodeSelector: {}
 tolerations: []
@@ -56,6 +58,17 @@ leaderElection:
 
 metrics:
   port: 8080
+  service:
+    # Creates a ClusterIP Service exposing the metrics port.
+    enabled: true
+  # Adds prometheus.io/scrape, port and path annotations to the pod, for
+  # Prometheus setups using annotation-based pod discovery.
+  podAnnotations: false
+  serviceMonitor:
+    # Creates a ServiceMonitor (requires the Prometheus Operator CRDs).
+    enabled: false
+    interval: 60s
+    labels: {}
 healthProbes:
   port: 8081
 
@@ -69,7 +82,9 @@ ecr:
   region: us-east-1
 
 gcr:
-  enabled: true  # Google host matching is cheap; keep on
+  # Enables the Google (GCR / Artifact Registry) credential provider, which
+  # uses Application Default Credentials / Workload Identity.
+  enabled: true
 
 slack:
   # Incoming webhook URL. Can be set directly or via existingSecret below.
@@ -82,17 +97,24 @@ slack:
 scan:
   # How frequently to rescan each unique image digest.
   intervalMinutes: 60
-  # Maximum concurrent scans.
-  concurrency: 3
+  # Upper bound for a single scan.
+  timeoutMinutes: 10
+  # Pause between consecutive scans. Scans always run one at a time; the
+  # cooldown keeps CPU and network use low on small nodes.
+  cooldownSeconds: 30
+  # Inventory records reconciled in parallel (does not parallelize scans).
+  concurrency: 1
 
 trivy:
   cacheDir: /var/cache/heimdall/trivy
   offline: false       # skip DB updates (needs a pre-populated cache)
   # Persistent volume for the trivy cache. Set storageClass to "" to use the
   # cluster default. When persistence.enabled=false, an emptyDir is used.
+  # The cache holds Trivy's vulnerability DB (~1.8 GB, refreshed daily) and,
+  # once a Java image has been scanned, the Java DB (~1.6 GB).
   persistence:
     enabled: true
-    size: 2Gi
+    size: 6Gi
     storageClass: ""
 
 # Install the CRDs as part of the chart. Set to false to manage them out of band.

@@ -1,181 +1,419 @@
 {{- if .Values.installCRDs }}
-apiVersion: apiextensions.k8s.io/v1
-kind: CustomResourceDefinition
-metadata:
-  name: imageinventories.heimdall.ulfhedinn.dev
-  annotations:
-    helm.sh/resource-policy: keep
-  labels:
-    {{- include "heimdall.labels" . | nindent 4 }}
-spec:
-  group: heimdall.ulfhedinn.dev
-  scope: Cluster
-  names:
-    kind: ImageInventory
-    listKind: ImageInventoryList
-    plural: imageinventories
-    singular: imageinventory
-    shortNames: [iinv]
-  versions:
-    - name: v1alpha1
-      served: true
-      storage: true
-      subresources:
-        status: {}
-      additionalPrinterColumns:
-        - name: Image
-          type: string
-          jsonPath: .spec.imageRef
-        - name: Result
-          type: string
-          jsonPath: .status.scanResult
-        - name: Critical
-          type: integer
-          jsonPath: .status.criticalCount
-        - name: High
-          type: integer
-          jsonPath: .status.highCount
-        - name: LastScan
-          type: date
-          jsonPath: .status.lastScannedAt
-        - name: Age
-          type: date
-          jsonPath: .metadata.creationTimestamp
-      schema:
-        openAPIV3Schema:
-          type: object
-          properties:
-            spec:
-              type: object
-              required: [imageRef, imageDigest]
-              properties:
-                imageRef:
-                  type: string
-                imageDigest:
-                  type: string
-                  pattern: "^sha256:[a-f0-9]{64}$"
-                pods:
-                  type: array
-                  items:
-                    type: object
-                    required: [namespace, name, uid, containerName, containerKind]
-                    properties:
-                      namespace: {type: string}
-                      name:      {type: string}
-                      uid:       {type: string}
-                      containerName: {type: string}
-                      containerKind:
-                        type: string
-                        enum: [container, initContainer, ephemeralContainer]
-            status:
-              type: object
-              properties:
-                lastScannedAt:
-                  type: string
-                  format: date-time
-                scanResult:
-                  type: string
-                  enum: [Pending, Clean, Vulnerable, Error]
-                criticalCount: {type: integer}
-                highCount: {type: integer}
-                mediumCount: {type: integer}
-                lowCount: {type: integer}
-                active: {type: boolean}
-                lastError: {type: string}
-                conditions:
-                  type: array
-                  items:
-                    type: object
-                    required: [type, status, lastTransitionTime, reason, message]
-                    properties:
-                      type: {type: string}
-                      status: {type: string, enum: [True, False, Unknown]}
-                      lastTransitionTime: {type: string, format: date-time}
-                      reason: {type: string}
-                      message: {type: string}
-                      observedGeneration: {type: integer}
 ---
 apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
-  name: vulnerabilityreports.heimdall.ulfhedinn.dev
   annotations:
+    controller-gen.kubebuilder.io/version: v0.23.0
     helm.sh/resource-policy: keep
   labels:
     {{- include "heimdall.labels" . | nindent 4 }}
+  name: imageinventories.heimdall.ulfhedinn.dev
 spec:
   group: heimdall.ulfhedinn.dev
+  names:
+    kind: ImageInventory
+    listKind: ImageInventoryList
+    plural: imageinventories
+    shortNames:
+    - iinv
+    singular: imageinventory
   scope: Cluster
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.imageRef
+      name: Image
+      type: string
+    - jsonPath: .spec.imageDigest
+      name: Digest
+      priority: 1
+      type: string
+    - jsonPath: .spec.pods[*]
+      name: Pods
+      priority: 1
+      type: integer
+    - jsonPath: .status.scanResult
+      name: Result
+      type: string
+    - jsonPath: .status.criticalCount
+      name: Critical
+      type: integer
+    - jsonPath: .status.highCount
+      name: High
+      type: integer
+    - jsonPath: .status.lastScannedAt
+      name: LastScan
+      type: date
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: |-
+          ImageInventory tracks a unique container image observed on the cluster and summarizes the
+          results of the most recent vulnerability scan.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: ImageInventorySpec defines the desired state of an ImageInventory
+              record.
+            properties:
+              imageDigest:
+                description: ImageDigest is the resolved sha256 digest of the image,
+                  including the `sha256:` prefix.
+                pattern: ^sha256:[a-f0-9]{64}$
+                type: string
+              imageRef:
+                description: ImageRef is a human-readable image reference such as
+                  `registry/repo:tag`.
+                type: string
+              pods:
+                description: |-
+                  Pods is the current set of pods running this image. When empty, the inventory entry
+                  is retained as historical data and marked inactive.
+                items:
+                  description: PodRef identifies a Pod that is running a particular
+                    image.
+                  properties:
+                    containerKind:
+                      description: ContainerKind indicates which part of the pod spec
+                        the container came from.
+                      enum:
+                      - container
+                      - initContainer
+                      - ephemeralContainer
+                      type: string
+                    containerName:
+                      description: ContainerName is the name of the container inside
+                        the pod that is running this image.
+                      type: string
+                    name:
+                      description: Name of the pod.
+                      type: string
+                    namespace:
+                      description: Namespace of the pod.
+                      type: string
+                    uid:
+                      description: UID of the pod, used to disambiguate recreated
+                        pods with the same name.
+                      type: string
+                  required:
+                  - containerKind
+                  - containerName
+                  - name
+                  - namespace
+                  - uid
+                  type: object
+                type: array
+            required:
+            - imageDigest
+            - imageRef
+            type: object
+          status:
+            description: ImageInventoryStatus defines the observed state of an ImageInventory
+              record.
+            properties:
+              active:
+                description: Active is true when at least one pod is currently running
+                  this image.
+                type: boolean
+              conditions:
+                description: Conditions represent the current status of the inventory
+                  entry.
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+              criticalCount:
+                description: CriticalCount is the number of CRITICAL findings in the
+                  most recent scan.
+                type: integer
+              highCount:
+                description: HighCount is the number of HIGH findings in the most
+                  recent scan.
+                type: integer
+              lastError:
+                description: LastError is the most recent scan error, if any.
+                type: string
+              lastScannedAt:
+                description: LastScannedAt is the timestamp of the most recent completed
+                  scan attempt.
+                format: date-time
+                type: string
+              lowCount:
+                description: LowCount is the number of LOW findings in the most recent
+                  scan.
+                type: integer
+              mediumCount:
+                description: MediumCount is the number of MEDIUM findings in the most
+                  recent scan.
+                type: integer
+              scanResult:
+                description: ScanResult is the summary of the most recent scan.
+                enum:
+                - Pending
+                - Clean
+                - Vulnerable
+                - Error
+                type: string
+            required:
+            - active
+            - criticalCount
+            - highCount
+            type: object
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.23.0
+    helm.sh/resource-policy: keep
+  labels:
+    {{- include "heimdall.labels" . | nindent 4 }}
+  name: vulnerabilityreports.heimdall.ulfhedinn.dev
+spec:
+  group: heimdall.ulfhedinn.dev
   names:
     kind: VulnerabilityReport
     listKind: VulnerabilityReportList
     plural: vulnerabilityreports
+    shortNames:
+    - vulnreport
     singular: vulnerabilityreport
-    shortNames: [vulnreport]
+  scope: Cluster
   versions:
-    - name: v1alpha1
-      served: true
-      storage: true
-      subresources:
-        status: {}
-      additionalPrinterColumns:
-        - name: Image
-          type: string
-          jsonPath: .spec.imageRef
-        - name: Critical
-          type: integer
-          jsonPath: .status.summary.critical
-        - name: High
-          type: integer
-          jsonPath: .status.summary.high
-        - name: Generated
-          type: date
-          jsonPath: .status.generatedAt
-        - name: Age
-          type: date
-          jsonPath: .metadata.creationTimestamp
-      schema:
-        openAPIV3Schema:
-          type: object
-          properties:
-            spec:
-              type: object
-              required: [imageDigest]
-              properties:
-                imageDigest:
-                  type: string
-                  pattern: "^sha256:[a-f0-9]{64}$"
-                imageRef: {type: string}
-                scanner: {type: string}
-                scannerVersion: {type: string}
-                vulnDBVersion: {type: string}
-                findings:
-                  type: array
-                  items:
-                    type: object
-                    required: [vulnID, severity, packageName, version]
-                    properties:
-                      vulnID: {type: string}
-                      severity:
-                        type: string
-                        enum: [UNKNOWN, LOW, MEDIUM, HIGH, CRITICAL]
-                      packageName: {type: string}
-                      version: {type: string}
-                      fixedIn: {type: string}
-                      title: {type: string}
-                      primaryURL: {type: string}
-                      target: {type: string}
-                      firstSeen: {type: string, format: date-time}
-            status:
-              type: object
-              properties:
-                generatedAt: {type: string, format: date-time}
-                summary:
-                  type: object
+  - additionalPrinterColumns:
+    - jsonPath: .spec.imageRef
+      name: Image
+      type: string
+    - jsonPath: .status.summary.critical
+      name: Critical
+      type: integer
+    - jsonPath: .status.summary.high
+      name: High
+      type: integer
+    - jsonPath: .status.summary.medium
+      name: Medium
+      priority: 1
+      type: integer
+    - jsonPath: .status.summary.low
+      name: Low
+      priority: 1
+      type: integer
+    - jsonPath: .status.generatedAt
+      name: Generated
+      type: date
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: VulnerabilityReport collects the detailed CVE findings for a
+          scanned image digest.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: VulnerabilityReportSpec defines the vulnerabilities detected
+              for a specific image digest.
+            properties:
+              findings:
+                description: Findings is the full set of vulnerabilities detected.
+                items:
+                  description: Finding is a single vulnerability detected by a scanner
+                    for an image.
                   properties:
-                    critical: {type: integer}
-                    high: {type: integer}
-                    medium: {type: integer}
-                    low: {type: integer}
-                    unknown: {type: integer}
+                    firstSeen:
+                      description: FirstSeen is when this finding was first reported
+                        by this operator.
+                      format: date-time
+                      type: string
+                    fixedIn:
+                      description: FixedIn is the version in which the vulnerability
+                        is fixed, if known.
+                      type: string
+                    packageName:
+                      description: PackageName is the name of the vulnerable package.
+                      type: string
+                    primaryURL:
+                      description: PrimaryURL is a canonical reference URL for the
+                        vulnerability.
+                      type: string
+                    severity:
+                      description: Severity classification.
+                      enum:
+                      - UNKNOWN
+                      - LOW
+                      - MEDIUM
+                      - HIGH
+                      - CRITICAL
+                      type: string
+                    target:
+                      description: Target is the layer/target within the image where
+                        the finding was detected.
+                      type: string
+                    title:
+                      description: Title is a short human-readable description of
+                        the vulnerability.
+                      type: string
+                    version:
+                      description: Version is the installed version of the vulnerable
+                        package.
+                      type: string
+                    vulnID:
+                      description: VulnID is the vulnerability identifier (e.g. CVE-2024-1234,
+                        GHSA-xxxx).
+                      type: string
+                  required:
+                  - packageName
+                  - severity
+                  - version
+                  - vulnID
+                  type: object
+                type: array
+              imageDigest:
+                description: ImageDigest is the sha256 digest the findings apply to.
+                pattern: ^sha256:[a-f0-9]{64}$
+                type: string
+              imageRef:
+                description: ImageRef is the human-readable image reference captured
+                  at scan time.
+                type: string
+              scanner:
+                description: Scanner identifies the scanner that produced the report.
+                type: string
+              scannerVersion:
+                description: ScannerVersion is the version of the scanner.
+                type: string
+              vulnDBVersion:
+                description: VulnDBVersion is the vulnerability DB version used for
+                  the scan.
+                type: string
+            required:
+            - imageDigest
+            type: object
+          status:
+            description: VulnerabilityReportStatus is the observed state of a VulnerabilityReport.
+            properties:
+              generatedAt:
+                description: GeneratedAt is when the report was produced by the scanner.
+                format: date-time
+                type: string
+              summary:
+                description: Summary totals by severity.
+                properties:
+                  critical:
+                    type: integer
+                  high:
+                    type: integer
+                  low:
+                    type: integer
+                  medium:
+                    type: integer
+                  unknown:
+                    type: integer
+                required:
+                - critical
+                - high
+                - low
+                - medium
+                - unknown
+                type: object
+            required:
+            - summary
+            type: object
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}
 {{- end }}
