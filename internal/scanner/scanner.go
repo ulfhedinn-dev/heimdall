@@ -13,6 +13,7 @@ import (
 // controller package does not need to import trivy types directly.
 type Severity string
 
+// Severity levels, from least to most severe.
 const (
 	SeverityUnknown  Severity = "UNKNOWN"
 	SeverityLow      Severity = "LOW"
@@ -78,6 +79,22 @@ type Scanner interface {
 
 	// Scan performs a single image scan and returns a normalized report.
 	Scan(ctx context.Context, req Request) (*Report, error)
+}
+
+// SeverityRank orders severities from UNKNOWN (0) to CRITICAL (4).
+func SeverityRank(s Severity) int {
+	switch s {
+	case SeverityCritical:
+		return 4
+	case SeverityHigh:
+		return 3
+	case SeverityMedium:
+		return 2
+	case SeverityLow:
+		return 1
+	default:
+		return 0
+	}
 }
 
 // Summarize counts findings per severity.
