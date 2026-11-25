@@ -9,10 +9,12 @@ import (
 	"time"
 
 	"go.uber.org/zap/zapcore"
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
@@ -26,6 +28,9 @@ import (
 
 var (
 	scheme = runtime.NewScheme()
+
+	// version is set at build time via -ldflags "-X main.version=…".
+	version = "dev"
 )
 
 func init() {
@@ -40,6 +45,8 @@ type config struct {
 	leaderID        string
 	scanInterval    time.Duration
 	scanConcurrency int
+	scanTimeout     time.Duration
+	scanCooldown    time.Duration
 
 	slackWebhook string
 	minSeverity  string
@@ -49,6 +56,7 @@ type config struct {
 
 	ecrEnabled bool
 	ecrRegion  string
+	gcrEnabled bool
 }
 
 func parseFlags() config {
@@ -58,7 +66,9 @@ func parseFlags() config {
 	flag.BoolVar(&cfg.enableLeader, "leader-elect", false, "Enable leader election for controller manager.")
 	flag.StringVar(&cfg.leaderID, "leader-election-id", "heimdall.heimdall.ulfhedinn.dev", "Leader election resource name.")
 	flag.DurationVar(&cfg.scanInterval, "scan-interval", time.Hour, "How often to rescan each unique image digest.")
-	flag.IntVar(&cfg.scanConcurrency, "scan-concurrency", 3, "Maximum number of concurrent image scans.")
+	flag.IntVar(&cfg.scanConcurrency, "scan-concurrency", 1, "Inventory records reconciled in parallel. Trivy scans themselves always run one at a time.")
+	flag.DurationVar(&cfg.scanTimeout, "scan-timeout", 10*time.Minute, "Maximum duration of a single image scan.")
+	flag.DurationVar(&cfg.scanCooldown, "scan-cooldown", 30*time.Second, "Pause between consecutive scans, to limit load on small nodes.")
 
 	flag.StringVar(&cfg.slackWebhook, "slack-webhook-url", envOrDefault("HEIMDALL_SLACK_WEBHOOK", ""), "Slack incoming webhook URL. Empty disables alerts.")
 	flag.StringVar(&cfg.minSeverity, "min-severity", envOrDefault("HEIMDALL_MIN_SEVERITY", "HIGH"), "Minimum severity for Slack alerts (LOW|MEDIUM|HIGH|CRITICAL).")
@@ -68,6 +78,7 @@ func parseFlags() config {
 
 	flag.BoolVar(&cfg.ecrEnabled, "ecr-enabled", envTrue("HEIMDALL_ECR_ENABLED"), "Enable the ECR credential provider (uses IRSA).")
 	flag.StringVar(&cfg.ecrRegion, "ecr-region", envOrDefault("AWS_REGION", ""), "Override region for the ECR credential provider.")
+	flag.BoolVar(&cfg.gcrEnabled, "gcr-enabled", true, "Enable the GCR/Artifact Registry credential provider (Google ADC / Workload Identity).")
 
 	opts := zap.Options{Development: false, TimeEncoder: zapcore.ISO8601TimeEncoder}
 	opts.BindFlags(flag.CommandLine)
@@ -87,6 +98,9 @@ func main() {
 		HealthProbeBindAddress: cfg.probeAddr,
 		LeaderElection:         cfg.enableLeader,
 		LeaderElectionID:       cfg.leaderID,
+		// Pull secrets are read on demand; caching would mean watching every
+		// Secret in the cluster.
+		Client: client.Options{Cache: &client.CacheOptions{DisableFor: []client.Object{&corev1.Secret{}}}},
 	})
 	if err != nil {
 		setupLog.Error(err, "unable to start manager")
@@ -109,7 +123,9 @@ func main() {
 		ecr.Region = cfg.ecrRegion
 		providers = append(providers, ecr)
 	}
-	providers = append(providers, registry.NewGCRProvider())
+	if cfg.gcrEnabled {
+		providers = append(providers, registry.NewGCRProvider())
+	}
 	providers = append(providers, registry.NewPullSecretProvider(&controller.ClientSecretResolver{Client: mgr.GetClient()}))
 	creds := registry.NewChain(providers...)
 
@@ -117,6 +133,7 @@ func main() {
 	trivy := scanner.NewTrivyScanner()
 	trivy.CacheDir = cfg.trivyCacheDir
 	trivy.Offline = cfg.trivyOffline
+	trivy.Cooldown = cfg.scanCooldown
 
 	// Alerter.
 	minSev := heimdallv1alpha1.Severity(cfg.minSeverity)
@@ -136,6 +153,7 @@ func main() {
 		Creds:         creds,
 		Alerter:       alerter,
 		Interval:      cfg.scanInterval,
+		ScanTimeout:   cfg.scanTimeout,
 		MaxConcurrent: cfg.scanConcurrency,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to set up ImageScanReconciler")
@@ -145,6 +163,8 @@ func main() {
 	setupLog.Info("starting manager",
 		"scanInterval", cfg.scanInterval,
 		"scanConcurrency", cfg.scanConcurrency,
+		"scanCooldown", cfg.scanCooldown,
+		"version", version,
 		"ecrEnabled", cfg.ecrEnabled,
 		"alertsEnabled", cfg.slackWebhook != "",
 		"minSeverity", cfg.minSeverity,
@@ -173,4 +193,3 @@ func envTrue(key string) bool {
 	}
 	return false
 }
-

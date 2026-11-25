@@ -25,7 +25,7 @@ type ImageInventorySpec struct {
 	ImageRef string `json:"imageRef"`
 
 	// ImageDigest is the resolved sha256 digest of the image, including the `sha256:` prefix.
-	// +kubebuilder:validation:Pattern=^sha256:[a-f0-9]{64}$
+	// +kubebuilder:validation:Pattern=`^sha256:[a-f0-9]{64}$`
 	ImageDigest string `json:"imageDigest"`
 
 	// Pods is the current set of pods running this image. When empty, the inventory entry
@@ -38,6 +38,7 @@ type ImageInventorySpec struct {
 // +kubebuilder:validation:Enum=Pending;Clean;Vulnerable;Error
 type ScanResult string
 
+// Scan results reported in ImageInventory status.
 const (
 	ScanResultPending    ScanResult = "Pending"
 	ScanResultClean      ScanResult = "Clean"

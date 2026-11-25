@@ -61,21 +61,13 @@ func (p *GCRProvider) GetCredentials(ctx context.Context, imageRef string) (auth
 	if err != nil {
 		return nil, err
 	}
-	reg, err := resourceForHost(host)
-	if err != nil {
-		return nil, err
-	}
-	return kc.Resolve(reg)
+	return kc.Resolve(registryResource{host: host})
 }
 
-// resourceForHost wraps a hostname into an authn.Resource. We use a small
+// registryResource wraps a hostname into an authn.Resource. We use a small
 // shim rather than depending on name.NewRegistry here to avoid pulling in the
 // parser twice.
 type registryResource struct{ host string }
 
-func (r registryResource) String() string     { return r.host }
+func (r registryResource) String() string      { return r.host }
 func (r registryResource) RegistryStr() string { return r.host }
-
-func resourceForHost(host string) (authn.Resource, error) {
-	return registryResource{host: host}, nil
-}
