@@ -223,7 +223,21 @@ make docker-build IMAGE_TAG=dev
 make helm-lint
 ```
 
-CI (GitHub Actions) runs lint, unit tests, a generated-code check, Helm lint and the kind end-to-end test on every pull request. Pushes to `main` publish `linux/amd64` and `linux/arm64` images to `ghcr.io/ulfhedinn-dev/heimdall`. A `vX.Y.Z` tag also pushes the Helm chart to `oci://ghcr.io/ulfhedinn-dev/charts/heimdall` and creates a GitHub release. The chart's `version` and `appVersion` must match the tag.
+### Releases: continuous delivery
+
+Every push runs CI (GitHub Actions): lint, unit tests, a generated-code check, Helm lint and the kind end-to-end test.
+
+**Every merge to `main` that passes CI is released.** The version comes from the [Conventional Commits](https://www.conventionalcommits.org/) since the last tag ([`hack/next-version.sh`](hack/next-version.sh)). With squash merges, use the PR title:
+
+| Commit | Release |
+| --- | --- |
+| `feat!: …` / `BREAKING CHANGE:` footer | major (`1.4.2` → `2.0.0`) |
+| `feat: …` | minor (`1.4.2` → `1.5.0`) |
+| anything else (`fix:`, `chore:`, `docs:` …) | patch (`1.4.2` → `1.4.3`) |
+
+A release builds and pushes `ghcr.io/ulfhedinn-dev/heimdall:X.Y.Z` (plus `X.Y`, `latest` and `sha-…`) for `linux/amd64` and `linux/arm64`. It also pushes the chart, versioned `X.Y.Z`, to `oci://ghcr.io/ulfhedinn-dev/charts/heimdall`, tags the commit `vX.Y.Z` and creates a GitHub release. Nobody edits versions by hand.
+
+**Out-of-band / hotfix release:** branch from the release tag (`git switch -c hotfix/1.4.x v1.4.2`), fix, push, then push a tag `v1.4.3` on that branch. CI publishes that exact version.
 
 ## Project layout
 

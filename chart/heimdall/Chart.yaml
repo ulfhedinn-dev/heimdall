@@ -2,6 +2,8 @@ apiVersion: v2
 name: heimdall
 description: Heimdall watches cluster images and scans them continuously for CVEs.
 type: application
+# version and appVersion are set by CI when it publishes a release
+# (helm package --version/--app-version); these are only defaults for local use.
 version: 0.1.0
 appVersion: "0.1.0"
 kubeVersion: ">=1.27.0-0"
