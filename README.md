@@ -25,7 +25,7 @@ It is built for small clusters (it runs on Raspberry Pi): scans run one at a tim
 
 ## Install (Helm)
 
-The chart is published to GHCR as an OCI artifact:
+The chart is published to GHCR as an OCI artifact. The GHCR packages are private, so `helm registry login ghcr.io` with a token that has `read:packages` first, and give the cluster a matching pull secret (`imagePullSecrets`):
 
 ```bash
 kubectl create namespace heimdall
@@ -237,6 +237,8 @@ Every push runs CI (GitHub Actions): lint, unit tests, a generated-code check, H
 
 A release builds and pushes `ghcr.io/ulfhedinn-dev/heimdall:X.Y.Z` (plus `X.Y`, `latest` and `sha-…`) for `linux/amd64` and `linux/arm64`. It also pushes the chart, versioned `X.Y.Z`, to `oci://ghcr.io/ulfhedinn-dev/charts/heimdall`, tags the commit `vX.Y.Z` and creates a GitHub release. Nobody edits versions by hand.
 
+The same image tags and chart are then copied to the owner's Zot registry (`registry.ulfhedinn.net/heimdall`, `oci://registry.ulfhedinn.net/charts/heimdall`) by [`hack/mirror-to-zot.sh`](hack/mirror-to-zot.sh), which is what the highland cluster pulls. This needs the `ZOT_PUSH_PASSWORD` repository secret (Zot user `heimdall-ci`). Zot sits behind a Cloudflare tunnel that rejects request bodies over 100 MB, so layers are uploaded in 50 MB chunks. If this step fails, no tag or release is created; re-run the failed job.
+
 **Out-of-band / hotfix release:** branch from the release tag (`git switch -c hotfix/1.4.x v1.4.2`), fix, push, then push a tag `v1.4.3` on that branch. CI publishes that exact version.
 
 ## Project layout
@@ -251,7 +253,7 @@ heimdall/
 │   ├── scanner/             # Scanner interface + Trivy implementation
 │   └── alert/               # Slack webhook alerter
 ├── chart/heimdall/          # Helm chart (CRDs generated from api/)
-├── hack/                    # e2e test, CRD generation, smoke scan
+├── hack/                    # e2e test, CRD generation, smoke scan, Zot copy
 ├── Dockerfile               # Distroless, multi-arch
 └── .github/workflows/ci.yml # Lint, test, e2e, build, push to GHCR, release
 ```
