@@ -6,10 +6,12 @@ metadata:
     {{- include "heimdall.labels" . | nindent 4 }}
 rules:
   - apiGroups: [""]
-    resources:
-      - pods
-      - secrets
+    resources: [pods]
     verbs: [get, list, watch]
+  # imagePullSecrets are read on demand (not cached or watched).
+  - apiGroups: [""]
+    resources: [secrets]
+    verbs: [get]
   - apiGroups: ["heimdall.ulfhedinn.dev"]
     resources:
       - imageinventories

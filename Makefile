@@ -44,9 +44,25 @@ docker-push:
 generate: $(CONTROLLER_GEN)
 	$(CONTROLLER_GEN) object:headerFile="hack/boilerplate.go.txt" paths="./api/..."
 
+# Regenerate the chart's CRDs from the Go API types.
 .PHONY: manifests
 manifests: $(CONTROLLER_GEN)
-	$(CONTROLLER_GEN) crd rbac:roleName=manager-role webhook paths="./..." output:crd:artifacts:config=config/crd/bases
+	CONTROLLER_GEN=$(CONTROLLER_GEN) ./hack/gen-chart-crds.sh
+
+# Fail if generated code or CRDs are out of date (used by CI).
+.PHONY: verify-generated
+verify-generated: generate manifests
+	git diff --exit-code -- api chart/heimdall/templates/crds.yaml
+
+# Run one real Trivy scan through Heimdall's scanner (needs network access).
+.PHONY: smoke
+smoke:
+	$(GO) run ./hack/smoke $(or $(IMAGE),alpine:3.18.0)
+
+# End-to-end test in a throwaway kind cluster (needs docker and kind).
+.PHONY: e2e
+e2e:
+	./hack/e2e.sh
 
 .PHONY: helm-lint
 helm-lint:
@@ -57,10 +73,10 @@ helm-template:
 	helm template heimdall chart/heimdall
 
 $(CONTROLLER_GEN):
-	GOBIN=$(BIN_DIR) $(GO) install sigs.k8s.io/controller-tools/cmd/controller-gen@v0.16.4
+	GOBIN=$(BIN_DIR) $(GO) install sigs.k8s.io/controller-tools/cmd/controller-gen@v0.23.0
 
 $(GOLANGCI_LINT):
-	GOBIN=$(BIN_DIR) $(GO) install github.com/golangci/golangci-lint/cmd/golangci-lint@v1.60.3
+	GOBIN=$(BIN_DIR) $(GO) install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.15.0
 
 .PHONY: clean
 clean:

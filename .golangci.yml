@@ -1,44 +1,49 @@
+version: "2"
+
 run:
-  timeout: 5m
-  go: "1.22"
+  timeout: 15m
   tests: true
   modules-download-mode: readonly
 
 linters:
-  disable-all: true
+  default: none
   enable:
     - errcheck
     - gocritic
-    - gofmt
-    - goimports
-    - gosimple
     - govet
     - ineffassign
     - misspell
     - revive
     - staticcheck
-    - typecheck
     - unconvert
     - unparam
     - unused
-
-linters-settings:
-  revive:
+  settings:
+    revive:
+      rules:
+        - name: var-naming
+        - name: exported
+          arguments:
+            - "disableStutteringCheck"
+    gocritic:
+      disabled-checks:
+        - ifElseChain
+        - singleCaseSwitch
+  exclusions:
+    generated: lax
+    presets:
+      - std-error-handling
     rules:
-      - name: var-naming
-      - name: exported
-        arguments:
-          - "disableStutteringCheck"
-  gocritic:
-    disabled-checks:
-      - ifElseChain
-      - singleCaseSwitch
+      - path: _test\.go
+        linters:
+          - errcheck
+          - unparam
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
 
 issues:
-  exclude-rules:
-    - path: _test\.go
-      linters:
-        - errcheck
-        - unparam
   max-issues-per-linter: 0
   max-same-issues: 0

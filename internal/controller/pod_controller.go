@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"strings"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -42,7 +43,7 @@ type ContainerSpec struct {
 }
 
 // +kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch
-// +kubebuilder:rbac:groups=core,resources=secrets,verbs=get;list;watch
+// +kubebuilder:rbac:groups=core,resources=secrets,verbs=get
 // +kubebuilder:rbac:groups=heimdall.ulfhedinn.dev,resources=imageinventories,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=heimdall.ulfhedinn.dev,resources=imageinventories/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=heimdall.ulfhedinn.dev,resources=vulnerabilityreports,verbs=get;list;watch;create;update;patch;delete
@@ -50,7 +51,7 @@ type ContainerSpec struct {
 
 // Reconcile implements reconcile.Reconciler.
 func (r *PodReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
-	logger := log.FromContext(ctx).WithValues("pod", req.NamespacedName.String())
+	logger := log.FromContext(ctx).WithValues("pod", req.String())
 
 	var pod corev1.Pod
 	err := r.Get(ctx, req.NamespacedName, &pod)
@@ -74,6 +75,11 @@ func (r *PodReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 			continue
 		}
 		if err := r.upsertInventory(ctx, &pod, c); err != nil {
+			if apierrors.IsConflict(err) {
+				// Another writer (usually the scanner updating status) got
+				// there first; retry with fresh data.
+				return ctrl.Result{RequeueAfter: time.Second}, nil
+			}
 			logger.Error(err, "upsert inventory", "image", c.Image, "digest", c.Digest)
 			return ctrl.Result{}, err
 		}
@@ -130,7 +136,7 @@ func ExtractContainers(pod *corev1.Pod) []ContainerSpec {
 	for _, c := range pod.Spec.EphemeralContainers {
 		out = append(out, ContainerSpec{
 			Name:   c.Name,
-			Image:  c.EphemeralContainerCommon.Image,
+			Image:  c.Image,
 			Digest: ephemeralStatuses[c.Name],
 			Kind:   "ephemeralContainer",
 		})
@@ -180,8 +186,6 @@ func (r *PodReconciler) upsertInventory(ctx context.Context, pod *corev1.Pod, c 
 			inv.Labels = map[string]string{}
 		}
 		inv.Labels["heimdall.ulfhedinn.dev/digest-prefix"] = safeDigestLabel(c.Digest)
-		// Label by pod namespace so cleanupDeletedPod can scope its list query.
-		inv.Labels["heimdall.ulfhedinn.dev/pod-namespace"] = pod.Namespace
 		inv.Spec.ImageRef = c.Image
 		inv.Spec.ImageDigest = c.Digest
 		inv.Spec.Pods = upsertPodRef(inv.Spec.Pods, podRef)
@@ -191,18 +195,13 @@ func (r *PodReconciler) upsertInventory(ctx context.Context, pod *corev1.Pod, c 
 		return fmt.Errorf("create/update ImageInventory %s: %w", name, err)
 	}
 
-	// Status subresource: mark active, preserve scan counts, ensure Pending is set on first write.
-	if err := r.ensureInventoryStatus(ctx, name); err != nil {
-		return err
-	}
-	return nil
+	// Status subresource: mark active, preserve scan counts, ensure Pending is
+	// set on first write. inv holds the object as just written, which the
+	// informer cache may not have caught up with yet.
+	return r.ensureInventoryStatus(ctx, inv)
 }
 
-func (r *PodReconciler) ensureInventoryStatus(ctx context.Context, name string) error {
-	var inv heimdallv1alpha1.ImageInventory
-	if err := r.Get(ctx, types.NamespacedName{Name: name}, &inv); err != nil {
-		return err
-	}
+func (r *PodReconciler) ensureInventoryStatus(ctx context.Context, inv *heimdallv1alpha1.ImageInventory) error {
 	changed := false
 	if !inv.Status.Active {
 		inv.Status.Active = true
@@ -215,7 +214,7 @@ func (r *PodReconciler) ensureInventoryStatus(ctx context.Context, name string) 
 	if !changed {
 		return nil
 	}
-	return r.Status().Update(ctx, &inv)
+	return r.Status().Update(ctx, inv)
 }
 
 func upsertPodRef(existing []heimdallv1alpha1.PodRef, ref heimdallv1alpha1.PodRef) []heimdallv1alpha1.PodRef {
@@ -229,9 +228,10 @@ func upsertPodRef(existing []heimdallv1alpha1.PodRef, ref heimdallv1alpha1.PodRe
 }
 
 // cleanupDeletedPod removes stale pod references from ImageInventory objects
-// when a pod is deleted. It scopes the list to the relevant namespace via a
-// label filter (Fix 8) and validates each ref's UID against the current pod
-// so a re-created pod with the same name is never mistakenly removed (Fix 3).
+// when a pod is deleted. An image digest can be shared by pods in many
+// namespaces, so every inventory is checked (the list is served from the
+// informer cache). Each ref's UID is validated against the current pod so a
+// re-created pod with the same name is never mistakenly removed.
 func (r *PodReconciler) cleanupDeletedPod(ctx context.Context, key types.NamespacedName) error {
 	// Determine the UID of any pod currently running with this namespace/name.
 	// If the pod was immediately re-created it will have a different UID from
@@ -245,9 +245,7 @@ func (r *PodReconciler) cleanupDeletedPod(ctx context.Context, key types.Namespa
 	}
 
 	var list heimdallv1alpha1.ImageInventoryList
-	if err := r.List(ctx, &list, client.MatchingLabels{
-		"heimdall.ulfhedinn.dev/pod-namespace": key.Namespace,
-	}); err != nil {
+	if err := r.List(ctx, &list); err != nil {
 		return err
 	}
 	for i := range list.Items {

@@ -37,7 +37,8 @@ const notifiedTTL = 7 * 24 * time.Hour
 // SlackAlerter posts to a Slack-compatible incoming webhook URL.
 //
 // It filters findings below MinSeverity and suppresses re-alerts for the same
-// digest+vuln combination within notifiedTTL (7 days), keeping memory bounded.
+// digest+vuln+package combination within notifiedTTL (7 days), keeping memory
+// bounded.
 type SlackAlerter struct {
 	WebhookURL  string
 	MinSeverity heimdallv1alpha1.Severity
@@ -52,7 +53,7 @@ type SlackAlerter struct {
 	IconEmoji string
 
 	mu         sync.Mutex
-	notifiedAt map[string]time.Time // "digest:vulnID" -> when last alerted
+	notifiedAt map[string]time.Time // "digest:vulnID|package" -> when last alerted
 }
 
 // NewSlackAlerter constructs an alerter. When url is empty, Noop is returned.
@@ -77,7 +78,7 @@ func (s *SlackAlerter) Notify(ctx context.Context, report *scanner.Report) error
 	if report == nil {
 		return nil
 	}
-	threshold := severityOrder(scannerSeverityFromAPI(s.MinSeverity))
+	threshold := scanner.SeverityRank(scannerSeverityFromAPI(s.MinSeverity))
 	now := time.Now()
 	// Collect new findings and update the TTL map under the lock.
 	var newOnes []scanner.Finding
@@ -89,10 +90,10 @@ func (s *SlackAlerter) Notify(ctx context.Context, report *scanner.Report) error
 		}
 	}
 	for _, f := range report.Findings {
-		if severityOrder(f.Severity) < threshold {
+		if scanner.SeverityRank(f.Severity) < threshold {
 			continue
 		}
-		key := report.ImageDigest + ":" + f.VulnID
+		key := report.ImageDigest + ":" + f.VulnID + "|" + f.PackageName
 		if t, ok := s.notifiedAt[key]; ok && now.Sub(t) <= notifiedTTL {
 			continue
 		}
@@ -153,8 +154,8 @@ func buildPayload(r *scanner.Report, findings []scanner.Finding, channel, userna
 	critical, high, medium, low, _ := scanner.Summarize(findings)
 	// Sort findings by severity (desc) then vulnID.
 	sort.SliceStable(findings, func(i, j int) bool {
-		if severityOrder(findings[i].Severity) != severityOrder(findings[j].Severity) {
-			return severityOrder(findings[i].Severity) > severityOrder(findings[j].Severity)
+		if scanner.SeverityRank(findings[i].Severity) != scanner.SeverityRank(findings[j].Severity) {
+			return scanner.SeverityRank(findings[i].Severity) > scanner.SeverityRank(findings[j].Severity)
 		}
 		return findings[i].VulnID < findings[j].VulnID
 	})
@@ -220,20 +221,5 @@ func scannerSeverityFromAPI(s heimdallv1alpha1.Severity) scanner.Severity {
 		return scanner.SeverityLow
 	default:
 		return scanner.SeverityUnknown
-	}
-}
-
-func severityOrder(s scanner.Severity) int {
-	switch s {
-	case scanner.SeverityCritical:
-		return 4
-	case scanner.SeverityHigh:
-		return 3
-	case scanner.SeverityMedium:
-		return 2
-	case scanner.SeverityLow:
-		return 1
-	default:
-		return 0
 	}
 }

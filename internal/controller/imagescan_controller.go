@@ -5,6 +5,8 @@ import (
 	"crypto/sha1"
 	"encoding/hex"
 	"fmt"
+	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -14,6 +16,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
@@ -38,6 +41,9 @@ type ImageScanReconciler struct {
 	Creds    registry.CredentialProvider
 	Alerter  alert.Alerter
 	Interval time.Duration
+
+	// ScanTimeout bounds a single scan. Zero means 10 minutes.
+	ScanTimeout time.Duration
 
 	// MaxConcurrent bounds how many scans run in parallel across the
 	// controller workqueue; map to the controller MaxConcurrentReconciles.
@@ -64,6 +70,12 @@ func (r *ImageScanReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	if inv.Spec.ImageDigest == "" {
 		return ctrl.Result{}, nil
 	}
+	// Images no longer used by any pod are kept as history but not rescanned.
+	// A new pod using the digest adds a ref, which triggers a reconcile.
+	if len(inv.Spec.Pods) == 0 {
+		forgetFindings(&inv)
+		return ctrl.Result{}, nil
+	}
 	if !r.isDue(&inv) {
 		return ctrl.Result{RequeueAfter: r.requeueAfter(&inv)}, nil
 	}
@@ -85,22 +97,27 @@ func (r *ImageScanReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		return r.markError(ctx, &inv, fmt.Errorf("resolve credentials: %w", err))
 	}
 
-	timeout := r.Interval / 2
+	timeout := r.ScanTimeout
 	if timeout <= 0 {
-		timeout = 5 * time.Minute
+		timeout = 10 * time.Minute
 	}
 
+	start := time.Now()
 	report, err := r.Scanner.Scan(ctx, scanner.Request{
 		ImageRef:    inv.Spec.ImageRef,
 		ImageDigest: inv.Spec.ImageDigest,
 		Auth:        auth,
 		Timeout:     timeout,
 	})
+	scanDuration.Observe(time.Since(start).Seconds())
 	if err != nil {
+		scansTotal.WithLabelValues("error").Inc()
 		return r.markError(ctx, &inv, err)
 	}
+	scansTotal.WithLabelValues("success").Inc()
 
-	if err := r.upsertReport(ctx, &inv, report); err != nil {
+	newFindings, err := r.upsertReport(ctx, &inv, report)
+	if err != nil {
 		return r.markError(ctx, &inv, fmt.Errorf("persist report: %w", err))
 	}
 
@@ -108,13 +125,23 @@ func (r *ImageScanReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		return r.markError(ctx, &inv, fmt.Errorf("update inventory status: %w", err))
 	}
 
-	if r.Alerter != nil {
-		if alertErr := r.Alerter.Notify(ctx, report); alertErr != nil {
+	recordFindings(&inv, report)
+
+	// Only findings not present in the previously stored report are sent, so
+	// operator restarts and periodic rescans don't repeat old alerts.
+	if r.Alerter != nil && len(newFindings) > 0 {
+		alertReport := *report
+		alertReport.Findings = newFindings
+		if alertErr := r.Alerter.Notify(ctx, &alertReport); alertErr != nil {
 			// Alert failures are logged, not fatal.
+			alertsTotal.WithLabelValues("error").Inc()
 			logger.Error(alertErr, "alert dispatch")
+		} else {
+			alertsTotal.WithLabelValues("sent").Inc()
 		}
 	}
 
+	logger.Info("scan complete", "image", inv.Spec.ImageRef, "findings", len(report.Findings), "new", len(newFindings))
 	return ctrl.Result{RequeueAfter: r.Interval}, nil
 }
 
@@ -198,10 +225,13 @@ func (r *ImageScanReconciler) credentialProviderFor(ctx context.Context, inv *he
 	return r.Creds
 }
 
-func (r *ImageScanReconciler) upsertReport(ctx context.Context, inv *heimdallv1alpha1.ImageInventory, rep *scanner.Report) error {
+// upsertReport writes the VulnerabilityReport for the inventory's digest and
+// returns the findings that were not present in the previously stored report.
+func (r *ImageScanReconciler) upsertReport(ctx context.Context, inv *heimdallv1alpha1.ImageInventory, rep *scanner.Report) ([]scanner.Finding, error) {
 	report := &heimdallv1alpha1.VulnerabilityReport{}
 	report.Name = reportNameForDigest(inv.Spec.ImageDigest)
 
+	var newFindings []scanner.Finding
 	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, report, func() error {
 		if err := controllerutil.SetControllerReference(inv, report, r.Scheme); err != nil {
 			return err
@@ -218,15 +248,24 @@ func (r *ImageScanReconciler) upsertReport(ctx context.Context, inv *heimdallv1a
 		// Build a map of existing findings so we can preserve FirstSeen timestamps.
 		existing := make(map[string]*metav1.Time, len(report.Spec.Findings))
 		for i := range report.Spec.Findings {
-			if f := &report.Spec.Findings[i]; f.FirstSeen != nil {
-				existing[f.VulnID] = f.FirstSeen
-			}
+			f := &report.Spec.Findings[i]
+			existing[findingKey(f.VulnID, f.PackageName)] = f.FirstSeen
 		}
-		report.Spec.Findings = toAPIFindings(rep.Findings, existing)
+		newFindings = newFindingsSince(rep.Findings, existing)
+		stored, dropped := capFindings(rep.Findings, maxStoredFindings)
+		report.Spec.Findings = toAPIFindings(stored, existing)
+		if dropped > 0 {
+			if report.Annotations == nil {
+				report.Annotations = map[string]string{}
+			}
+			report.Annotations[truncatedAnnotation] = strconv.Itoa(dropped)
+		} else {
+			delete(report.Annotations, truncatedAnnotation)
+		}
 		return nil
 	})
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	// Update status subresource.
@@ -241,59 +280,111 @@ func (r *ImageScanReconciler) upsertReport(ctx context.Context, inv *heimdallv1a
 			Unknown:  unknown,
 		},
 	}
-	return r.Status().Update(ctx, report)
+	return newFindings, r.Status().Update(ctx, report)
+}
+
+// maxStoredFindings keeps a VulnerabilityReport well below etcd's ~1.5 MiB
+// object limit (a finding is roughly 300 bytes). The status summary still
+// counts every finding.
+const maxStoredFindings = 3000
+
+// truncatedAnnotation records how many lower-severity findings were left out
+// of a report because of maxStoredFindings.
+const truncatedAnnotation = "heimdall.ulfhedinn.dev/truncated-findings"
+
+// capFindings returns at most limit findings, keeping the most severe, and the
+// number dropped.
+func capFindings(in []scanner.Finding, limit int) ([]scanner.Finding, int) {
+	if len(in) <= limit {
+		return in, 0
+	}
+	sorted := slices.Clone(in)
+	slices.SortStableFunc(sorted, func(a, b scanner.Finding) int {
+		return scanner.SeverityRank(b.Severity) - scanner.SeverityRank(a.Severity)
+	})
+	return sorted[:limit], len(in) - limit
+}
+
+// findingKey identifies a finding within one image: the same CVE can affect
+// several packages.
+func findingKey(vulnID, pkg string) string { return vulnID + "|" + pkg }
+
+// newFindingsSince returns the findings whose key is not in existing.
+func newFindingsSince(findings []scanner.Finding, existing map[string]*metav1.Time) []scanner.Finding {
+	var out []scanner.Finding
+	seen := make(map[string]bool, len(findings))
+	for _, f := range findings {
+		k := findingKey(f.VulnID, f.PackageName)
+		if _, ok := existing[k]; ok || seen[k] {
+			continue
+		}
+		seen[k] = true
+		out = append(out, f)
+	}
+	return out
 }
 
 func (r *ImageScanReconciler) updateInventoryStatus(ctx context.Context, inv *heimdallv1alpha1.ImageInventory, rep *scanner.Report) error {
-	// Re-fetch to avoid stale status writes.
-	fresh := &heimdallv1alpha1.ImageInventory{}
-	if err := r.Get(ctx, types.NamespacedName{Name: inv.Name}, fresh); err != nil {
-		return err
-	}
 	critical, high, medium, low, _ := scanner.Summarize(rep.Findings)
+	return r.updateStatus(ctx, inv.Name, func(fresh *heimdallv1alpha1.ImageInventory) {
+		r.applyScanStatus(fresh, inv.Spec.ImageRef, critical, high, medium, low)
+	})
+}
+
+// updateStatus re-reads the inventory and applies mutate to its status,
+// retrying on write conflicts (the pod reconciler updates the same object).
+func (r *ImageScanReconciler) updateStatus(ctx context.Context, name string, mutate func(*heimdallv1alpha1.ImageInventory)) error {
+	return retry.RetryOnConflict(retry.DefaultBackoff, func() error {
+		fresh := &heimdallv1alpha1.ImageInventory{}
+		if err := r.Get(ctx, types.NamespacedName{Name: name}, fresh); err != nil {
+			return err
+		}
+		mutate(fresh)
+		return r.Status().Update(ctx, fresh)
+	})
+}
+
+func (r *ImageScanReconciler) applyScanStatus(fresh *heimdallv1alpha1.ImageInventory, imageRef string, critical, high, medium, low int) {
 	fresh.Status.LastScannedAt = &metav1.Time{Time: r.now()}
 	fresh.Status.CriticalCount = critical
 	fresh.Status.HighCount = high
 	fresh.Status.MediumCount = medium
 	fresh.Status.LowCount = low
 	fresh.Status.LastError = ""
-	switch {
-	case critical+high+medium+low == 0:
+	fresh.Status.ScanResult = heimdallv1alpha1.ScanResultVulnerable
+	if critical+high+medium+low == 0 {
 		fresh.Status.ScanResult = heimdallv1alpha1.ScanResultClean
-	default:
-		fresh.Status.ScanResult = heimdallv1alpha1.ScanResultVulnerable
 	}
 	fresh.Status.Conditions = setCondition(fresh.Status.Conditions, metav1.Condition{
 		Type:    "Scanned",
 		Status:  metav1.ConditionTrue,
 		Reason:  "ScanCompleted",
-		Message: fmt.Sprintf("scanned %s", inv.Spec.ImageRef),
+		Message: fmt.Sprintf("scanned %s", imageRef),
 	})
-	return r.Status().Update(ctx, fresh)
 }
 
 func (r *ImageScanReconciler) markError(ctx context.Context, inv *heimdallv1alpha1.ImageInventory, scanErr error) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
 	logger.Error(scanErr, "scan failed", "digest", inv.Spec.ImageDigest)
 
-	fresh := &heimdallv1alpha1.ImageInventory{}
-	if getErr := r.Get(ctx, types.NamespacedName{Name: inv.Name}, fresh); getErr != nil {
-		return ctrl.Result{}, scanErr
-	}
-	fresh.Status.LastError = truncate(scanErr.Error(), 512)
-	fresh.Status.ScanResult = heimdallv1alpha1.ScanResultError
-	fresh.Status.LastScannedAt = &metav1.Time{Time: r.now()}
-	fresh.Status.Conditions = setCondition(fresh.Status.Conditions, metav1.Condition{
-		Type:    "Scanned",
-		Status:  metav1.ConditionFalse,
-		Reason:  "ScanFailed",
-		Message: truncate(scanErr.Error(), 256),
+	updateErr := r.updateStatus(ctx, inv.Name, func(fresh *heimdallv1alpha1.ImageInventory) {
+		fresh.Status.LastError = truncate(scanErr.Error(), 512)
+		fresh.Status.ScanResult = heimdallv1alpha1.ScanResultError
+		fresh.Status.LastScannedAt = &metav1.Time{Time: r.now()}
+		fresh.Status.Conditions = setCondition(fresh.Status.Conditions, metav1.Condition{
+			Type:    "Scanned",
+			Status:  metav1.ConditionFalse,
+			Reason:  "ScanFailed",
+			Message: truncate(scanErr.Error(), 256),
+		})
 	})
-	if updateErr := r.Status().Update(ctx, fresh); updateErr != nil {
+	if updateErr != nil {
 		logger.Error(updateErr, "update error status")
+		return ctrl.Result{}, updateErr
 	}
-	// Backoff: controller-runtime will exponentially retry.
-	return ctrl.Result{RequeueAfter: 5 * time.Minute}, scanErr
+	// The error is recorded on the inventory; retry on the normal schedule
+	// rather than hammering a registry that is failing.
+	return ctrl.Result{RequeueAfter: r.Interval}, nil
 }
 
 func reportNameForDigest(digest string) string {
@@ -309,7 +400,7 @@ func toAPIFindings(in []scanner.Finding, existing map[string]*metav1.Time) []hei
 	out := make([]heimdallv1alpha1.Finding, 0, len(in))
 	for _, f := range in {
 		firstSeen := now
-		if t, ok := existing[f.VulnID]; ok && t != nil {
+		if t, ok := existing[findingKey(f.VulnID, f.PackageName)]; ok && t != nil {
 			firstSeen = t
 		}
 		out = append(out, heimdallv1alpha1.Finding{
@@ -334,7 +425,7 @@ func truncate(s string, n int) string {
 	return s[:n] + "…"
 }
 
-// SecretsForPod implements registry.PodSecretResolver so a controller client
+// ClientSecretResolver implements registry.PodSecretResolver so a controller client
 // can be dropped directly into the credential chain if desired.
 type ClientSecretResolver struct{ Client client.Client }
 

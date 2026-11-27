@@ -1,78 +1,137 @@
 name: ci
 
+# Continuous delivery: every push runs the checks; a push to main that passes
+# them is released as the next version (from Conventional Commits, see
+# hack/next-version.sh): multi-arch image + Helm chart on GHCR, a vX.Y.Z tag
+# and a GitHub release. Pushing a vX.Y.Z tag by hand (e.g. from a hotfix
+# branch cut from an older tag) publishes that version the same way.
+#
+# Checks run on branch pushes rather than pull_request events, so a PR from a
+# branch in this repo isn't tested twice; its status checks still show on the
+# PR because they're attached to the commit.
+
 on:
   push:
-    branches: [main]
+    branches: ["**"]
     tags: ["v*.*.*"]
-  pull_request:
-    branches: [main]
 
 permissions:
   contents: read
-  packages: write
+
+concurrency:
+  group: ci-${{ github.ref }}
+  # Never cancel a release in progress on main or a tag.
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' && !startsWith(github.ref, 'refs/tags/') }}
 
 jobs:
   lint:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
         with:
-          go-version: "1.22"
-          cache: true
+          go-version-file: go.mod
       - name: golangci-lint
-        uses: golangci/golangci-lint-action@v6
+        uses: golangci/golangci-lint-action@v9
         with:
-          version: v1.60.3
-          args: --timeout=5m
+          version: v2.15.0
+          args: --timeout=15m
 
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
         with:
-          go-version: "1.22"
-          cache: true
+          go-version-file: go.mod
       - run: go mod download
       - run: go vet ./...
-      - run: go test -race -count=1 ./...
+      - run: go test -race -count=1 -coverprofile=cover.out ./...
+      - run: go tool cover -func=cover.out | tail -1
+      - name: Generated code and CRDs are up to date
+        run: make verify-generated
 
   helm:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: azure/setup-helm@v4
+      - uses: actions/checkout@v7
+      - uses: azure/setup-helm@v5
         with:
-          version: v3.15.4
+          version: v4.3.2
       - run: helm lint chart/heimdall
       - run: helm template heimdall chart/heimdall > /tmp/rendered.yaml
+      - run: helm template heimdall chart/heimdall --set metrics.serviceMonitor.enabled=true --set metrics.podAnnotations=true --set slack.existingSecret=heimdall-slack > /tmp/rendered-all.yaml
+
+  e2e:
+    runs-on: ubuntu-latest
+    needs: [test]
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: azure/setup-helm@v5
+        with:
+          version: v4.3.2
+      - uses: helm/kind-action@v1
+        with:
+          version: v0.33.0
+          install_only: true
+      - name: Run end-to-end test in kind
+        run: ./hack/e2e.sh
+
+  version:
+    runs-on: ubuntu-latest
+    needs: [lint, test, helm, e2e]
+    if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/')
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+      minor: ${{ steps.v.outputs.minor }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: Determine version
+        id: v
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            version="${GITHUB_REF_NAME#v}"
+          else
+            version=$(./hack/next-version.sh)
+          fi
+          if [[ -z "$version" ]]; then
+            echo "HEAD is already released; nothing to publish."
+          else
+            echo "Releasing $version"
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "minor=$(cut -d. -f1-2 <<<"$version")" >> "$GITHUB_OUTPUT"
 
   build-and-push:
     runs-on: ubuntu-latest
-    needs: [lint, test]
-    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/'))
+    needs: [version]
+    if: needs.version.outputs.version != ''
+    permissions:
+      contents: read
+      packages: write
     steps:
-      - uses: actions/checkout@v4
-      - uses: docker/setup-qemu-action@v3
-      - uses: docker/setup-buildx-action@v3
-      - uses: docker/login-action@v3
+      - uses: actions/checkout@v7
+      - uses: docker/setup-qemu-action@v4
+      - uses: docker/setup-buildx-action@v4
+      - uses: docker/login-action@v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
       - name: Docker meta
         id: meta
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@v6
         with:
           images: ghcr.io/${{ github.repository }}
           tags: |
-            type=ref,event=branch
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=${{ needs.version.outputs.version }}
+            type=raw,value=${{ needs.version.outputs.minor }}
             type=sha
-            type=raw,value=latest,enable={{is_default_branch}}
-      - uses: docker/build-push-action@v6
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
+      - uses: docker/build-push-action@v7
         with:
           context: .
           platforms: linux/amd64,linux/arm64
@@ -80,24 +139,42 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
-            VERSION=${{ github.ref_name }}
+            VERSION=v${{ needs.version.outputs.version }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
   release:
     runs-on: ubuntu-latest
-    needs: [build-and-push]
-    if: startsWith(github.ref, 'refs/tags/')
+    needs: [version, build-and-push]
+    permissions:
+      contents: write
+      packages: write
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
+      - uses: azure/setup-helm@v5
         with:
-          fetch-depth: 0
-      - uses: actions/setup-go@v5
-        with:
-          go-version: "1.22"
-      - uses: goreleaser/goreleaser-action@v6
-        with:
-          version: latest
-          args: release --clean
+          version: v4.3.2
+      - name: Package and push Helm chart to GHCR
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          helm package chart/heimdall --version "$VERSION" --app-version "$VERSION" --destination dist
+          echo "$GITHUB_TOKEN" | helm registry login ghcr.io --username "${{ github.actor }}" --password-stdin
+          helm push "dist/heimdall-${VERSION}.tgz" "oci://ghcr.io/${{ github.repository_owner }}/charts"
+      # Creates the vX.Y.Z tag on this commit when it doesn't exist yet. Tags
+      # created with GITHUB_TOKEN don't trigger another workflow run.
+      - name: Create tag and GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          cat > notes.md <<NOTES
+          Container image: \`ghcr.io/${{ github.repository }}:${VERSION}\` (linux/amd64, linux/arm64)
+
+          Helm chart: \`helm install heimdall oci://ghcr.io/${{ github.repository_owner }}/charts/heimdall --version ${VERSION}\`
+          NOTES
+          gh release create "v${VERSION}" "dist/heimdall-${VERSION}.tgz" \
+            --target "$GITHUB_SHA" \
+            --title "Heimdall v${VERSION}" --notes-file notes.md --generate-notes \
+            $([[ "$VERSION" == *-* ]] && echo --prerelease)
