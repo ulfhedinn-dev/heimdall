@@ -237,7 +237,7 @@ Every push runs CI (GitHub Actions): lint, unit tests, a generated-code check, H
 
 A release builds and pushes `ghcr.io/ulfhedinn-dev/heimdall:X.Y.Z` (plus `X.Y`, `latest` and `sha-…`) for `linux/amd64` and `linux/arm64`. It also pushes the chart, versioned `X.Y.Z`, to `oci://ghcr.io/ulfhedinn-dev/charts/heimdall`, tags the commit `vX.Y.Z` and creates a GitHub release. Nobody edits versions by hand.
 
-The same image tags and chart are then copied to the owner's Zot registry (`registry.ulfhedinn.net/heimdall`, `oci://registry.ulfhedinn.net/charts/heimdall`) by [`hack/mirror-to-zot.sh`](hack/mirror-to-zot.sh), which is what the highland cluster pulls. This needs the `ZOT_PUSH_PASSWORD` repository secret (Zot user `heimdall-ci`). Zot sits behind a Cloudflare tunnel that rejects request bodies over 100 MB, so layers are uploaded in 50 MB chunks. If this step fails, no tag or release is created; re-run the failed job.
+The same image tags and chart are then copied to the owner's Zot registry (`registry.ulfhedinn.net/heimdall`, `oci://registry.ulfhedinn.net/charts/heimdall`) by [`hack/mirror-to-zot.sh`](hack/mirror-to-zot.sh), which is what the highland cluster pulls. This needs the `ZOT_PUSH_PASSWORD` repository secret (Zot user `publisher`). Zot sits behind a Cloudflare tunnel that rejects request bodies over 100 MB, so layers are uploaded in 50 MB chunks. If this step fails, no tag or release is created; re-run the failed job.
 
 **Out-of-band / hotfix release:** branch from the release tag (`git switch -c hotfix/1.4.x v1.4.2`), fix, push, then push a tag `v1.4.3` on that branch. CI publishes that exact version.
 

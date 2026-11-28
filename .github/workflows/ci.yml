@@ -173,7 +173,7 @@ jobs:
           chmod +x "$RUNNER_TEMP/regctl"
           echo "$RUNNER_TEMP" >> "$GITHUB_PATH"
       # The GHCR packages are private; highland pulls from the owner's Zot
-      # registry instead. The heimdall-ci Zot user can only push to the
+      # registry instead. The publisher Zot user can only push to the
       # heimdall and charts/heimdall repositories.
       - name: Copy image and chart to Zot
         env:
@@ -188,7 +188,7 @@ jobs:
             exit 1
           fi
           echo "$GITHUB_TOKEN" | regctl registry login ghcr.io --user "${{ github.actor }}" --pass-stdin
-          echo "$ZOT_PUSH_PASSWORD" | regctl registry login "$DST" --user heimdall-ci --pass-stdin
+          echo "$ZOT_PUSH_PASSWORD" | regctl registry login "$DST" --user publisher --pass-stdin
           bash hack/mirror-to-zot.sh
       # Creates the vX.Y.Z tag on this commit when it doesn't exist yet. Tags
       # created with GITHUB_TOKEN don't trigger another workflow run.
