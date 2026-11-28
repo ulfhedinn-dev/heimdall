@@ -3,8 +3,10 @@ name: ci
 # Continuous delivery: every push runs the checks; a push to main that passes
 # them is released as the next version (from Conventional Commits, see
 # hack/next-version.sh): multi-arch image + Helm chart on GHCR, a vX.Y.Z tag
-# and a GitHub release. Pushing a vX.Y.Z tag by hand (e.g. from a hotfix
-# branch cut from an older tag) publishes that version the same way.
+# and a GitHub release. The image and chart are also copied to the owner's Zot
+# registry (registry.ulfhedinn.net), which is what highland pulls. Pushing a
+# vX.Y.Z tag by hand (e.g. from a hotfix branch cut from an older tag)
+# publishes that version the same way.
 #
 # Checks run on branch pushes rather than pull_request events, so a PR from a
 # branch in this repo isn't tested twice; its status checks still show on the
@@ -163,6 +165,31 @@ jobs:
           helm package chart/heimdall --version "$VERSION" --app-version "$VERSION" --destination dist
           echo "$GITHUB_TOKEN" | helm registry login ghcr.io --username "${{ github.actor }}" --password-stdin
           helm push "dist/heimdall-${VERSION}.tgz" "oci://ghcr.io/${{ github.repository_owner }}/charts"
+      - name: Install regctl
+        run: |
+          curl -fsSL -o "$RUNNER_TEMP/regctl" \
+            https://github.com/regclient/regclient/releases/download/v0.11.7/regctl-linux-amd64
+          echo "3737fbbdd791e04e7a831640b681f3397a376498e80e2ad9b1b2d27296f239bc  $RUNNER_TEMP/regctl" | sha256sum -c -
+          chmod +x "$RUNNER_TEMP/regctl"
+          echo "$RUNNER_TEMP" >> "$GITHUB_PATH"
+      # The GHCR packages are private; highland pulls from the owner's Zot
+      # registry instead. The publisher Zot user can only push to the
+      # heimdall and charts/heimdall repositories.
+      - name: Copy image and chart to Zot
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ZOT_PUSH_PASSWORD: ${{ secrets.ZOT_PUSH_PASSWORD }}
+          SRC: ghcr.io/${{ github.repository_owner }}
+          DST: registry.ulfhedinn.net
+          EXTRA_TAGS: ${{ needs.version.outputs.minor }} ${{ github.ref == 'refs/heads/main' && 'latest' || '' }}
+        run: |
+          if [[ -z "$ZOT_PUSH_PASSWORD" ]]; then
+            echo "::error::The ZOT_PUSH_PASSWORD repository secret is not set."
+            exit 1
+          fi
+          echo "$GITHUB_TOKEN" | regctl registry login ghcr.io --user "${{ github.actor }}" --pass-stdin
+          echo "$ZOT_PUSH_PASSWORD" | regctl registry login "$DST" --user publisher --pass-stdin
+          bash hack/mirror-to-zot.sh
       # Creates the vX.Y.Z tag on this commit when it doesn't exist yet. Tags
       # created with GITHUB_TOKEN don't trigger another workflow run.
       - name: Create tag and GitHub release
